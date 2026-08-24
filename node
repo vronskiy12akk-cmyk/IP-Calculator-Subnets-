@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+const { program } = require('commander');
+const fs = require('fs');
+
+function ipToInt(ip) {
+    const parts = ip.split('.');
+    return (parseInt(parts[0]) << 24) | (parseInt(parts[1]) << 16) | (parseInt(parts[2]) << 8) | parseInt(parts[3]);
+}
+
+function intToIP(num) {
+    return [(num >>> 24) & 255, (num >>> 16) & 255, (num >>> 8) & 255, num & 255].join('.');
+}
+
+function prefixToMask(prefix) {
+    return (~0 << (32 - prefix)) >>> 0;
+}
+
+function maskToPrefix(mask) {
+    return mask.toString(2).split('1').length - 1;
+}
+
+function ipBinary(num) {
+    return [(num >>> 24) & 255, (num >>> 16) & 255, (num >>> 8) & 255, num & 255]
+        .map(b => b.toString(2).padStart(8, '0')).join('.');
+}
+
+class IPCalc {
+    constructor(input, mask) {
+        let ipInt, maskInt, prefix;
+        if (input.includes('/')) {
+            const [ipPart, prefixStr] = input.split('/');
+            ipInt = ipToInt(ipPart);
+            prefix = parseInt(prefixStr);
+            maskInt = prefixToMask(prefix);
+        } else if (mask) {
+            ipInt = ipToInt(input);
+            if (mask.includes('.')) {
+                maskInt = ipToInt(mask);
+                prefix = maskToPrefix(maskInt);
+            } else {
+                prefix = parseInt(mask);
+                maskInt = prefixToMask(prefix);
+            }
+        } else {
+            throw new Error('Invalid input');
+        }
+        this.ipInt = ipInt;
+        this.maskInt = maskInt;
+        this.prefix = prefix;
+        this.networkInt = ipInt & maskInt;
+        this.broadcast = this.networkInt | (~maskInt >>> 0);
+        this.wildcard = (~maskInt >>> 0);
+        this.totalHosts = 1 << (32 - prefix);
+        this.usableHosts = Math.max(0, this.totalHosts - 2);
+        this.firstUsable = this.networkInt === this.broadcast ? null : this.networkInt + 1;
+        this.lastUsable = this.networkInt === this.broadcast ? null : this.broadcast - 1;
+    }
+
+    toJSON() {
+        return {
+            ip: intToIP(this.ipInt),
+            mask: intToIP(this.maskInt),
+            prefix: this.prefix,
+            network: intToIP(this.networkInt),
+            broadcast: intToIP(this.broadcast),
+            wildcard: intToIP(this.wildcard),
+            first_usable: this.firstUsable !== null ? intToIP(this.firstUsable) : null,
+            last_usable: this.lastUsable !== null ? intToIP(this.lastUsable) : null,
+            total_hosts: this.totalHosts,
+            usable_hosts: this.usableHosts,
+        };
+    }
+
+    subnets(newPrefix) {
+        if (newPrefix <= this.prefix) throw new Error('New prefix must be larger than original');
+        const num = 1 << (newPrefix - this.prefix);
+        const step = 1 << (32 - newPrefix);
+        const results = [];
+        for (let i = 0; i < num; i++) {
+            const net = this.networkInt + i * step;
+            const sub = new IPCalc(intToIP(net), String(newPrefix));
+            results.push({
+                network: intToIP(sub.networkInt),
+                prefix: sub.prefix,
+                first_usable: sub.firstUsable !== null ? intToIP(sub.firstUsable) : 'none',
+                last_usable: sub.lastUsable !== null ? intToIP(sub.lastUsable) : 'none',
+            });
+        }
+        return results;
+    }
+}
+
+program
+    .argument('<input>', 'IP address (CIDR or IP)')
+    .argument('[mask]', 'Subnet mask if not in CIDR')
+    .option('--subnet <prefix>', 'Create subnets of this prefix length', parseInt)
+    .option('--bin', 'Show binary representation')
+    .option('--json', 'Output JSON')
+    .action((input, mask, options) => {
+        try {
+            const calc = new IPCalc(input, mask);
+            const result = calc.toJSON();
+            let subnets = [];
+            if (options.subnet) {
+                subnets = calc.subnets(options.subnet);
+            }
+            if (options.bin) {
+                result.binary_ip = ipBinary(calc.ipInt);
+                result.binary_mask = ipBinary(calc.maskInt);
+                result.binary_network = ipBinary(calc.networkInt);
+                result.binary_broadcast = ipBinary(calc.broadcast);
+            }
+            if (options.json) {
+                if (subnets.length) result.subnets = subnets;
+                console.log(JSON.stringify(result, null, 2));
+                return;
+            }
+            console.log('\nIP Calculator');
+            console.log(`IP Address:     ${result.ip}`);
+            console.log(`Subnet Mask:    ${result.mask} (/${result.prefix})`);
+            console.log(`Network:        ${result.network}`);
+            console.log(`Broadcast:      ${result.broadcast}`);
+            console.log(`Wildcard Mask:  ${result.wildcard}`);
+            if (result.first_usable) {
+                console.log(`First Usable:   ${result.first_usable}`);
+                console.log(`Last Usable:    ${result.last_usable}`);
+            } else {
+                console.log('First Usable:   (none)');
+                console.log('Last Usable:    (none)');
+            }
+            console.log(`Total Hosts:    ${result.total_hosts}`);
+            console.log(`Usable Hosts:   ${result.usable_hosts}`);
+            if (options.bin) {
+                console.log('\nBinary:');
+                console.log(`IP:      ${result.binary_ip}`);
+                console.log(`Mask:    ${result.binary_mask}`);
+                console.log(`Network: ${result.binary_network}`);
+            }
+            if (subnets.length) {
+                console.log(`\nSubnets (/${options.subnet}):`);
+                for (const s of subnets) {
+                    console.log(`  ${s.network}/${s.prefix}   (${s.first_usable} - ${s.last_usable})`);
+                }
+            }
+        } catch (err) {
+            console.error(`Error: ${err.message}`);
+            process.exit(1);
+        }
+    });
+
+program.parse(process.argv);
